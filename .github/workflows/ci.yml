@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 3.3.0
       - name: Démarrer Supabase (services utiles aux tests)
         run: supabase start -x studio,imgproxy,edge-runtime,logflare,vector,supavisor,mailpit,postgres-meta
       - name: Lint SQL (plpgsql_check)
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 3.3.0
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
@@ -112,7 +112,7 @@ jobs:
       - uses: supabase/setup-cli@v1
         if: steps.check.outputs.skip != 'true'
         with:
-          version: latest
+          version: 3.3.0
       - name: Lier le projet
         if: steps.check.outputs.skip != 'true'
         run: supabase link --project-ref "$PROJECT_REF"
