@@ -310,10 +310,14 @@ secrets = "env(SEND_SMS_HOOK_SECRETS)"
 # uri = "pg-functions://<database>/<schema>/<hook_name>"
 
 # Configure one of the supported SMS providers: `twilio`, `twilio_verify`, `messagebird`, `textlocal`, `vonage`.
+# JammTech : bloc FACTICE, actif uniquement en local / CI. Le CLI désactive la
+# connexion par téléphone si aucun fournisseur natif n'est activé, même avec le
+# hook send_sms (qui reste prioritaire dans GoTrue). Le pipeline de déploiement
+# repasse ce bloc à `enabled = false` avant `supabase config push`.
 [auth.sms.twilio]
-enabled = false
-account_sid = ""
-message_service_sid = ""
+enabled = true
+account_sid = "local-placeholder"
+message_service_sid = "local-placeholder"
 # DO NOT commit your Twilio auth token to git. Use environment variable substitution instead:
 auth_token = "env(SUPABASE_AUTH_SMS_TWILIO_AUTH_TOKEN)"
 

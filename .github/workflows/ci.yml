@@ -143,7 +143,12 @@ jobs:
         run: supabase functions deploy --project-ref "$PROJECT_REF" --use-api
       - name: Configuration Auth (hook SMS, téléphone, MFA, limites)
         if: steps.check.outputs.skip != 'true'
-        run: supabase config push --project-ref "$PROJECT_REF" --yes
+        run: |
+          # Le bloc Twilio factice de config.toml ne sert qu'en local : jamais en ligne.
+          sed -i '/^\[auth\.sms\.twilio\]$/,/^enabled = /s/^enabled = true$/enabled = false/' supabase/config.toml
+          sed -n '/^\[auth\.sms\.twilio\]$/,/^enabled = /p' supabase/config.toml | grep -qx 'enabled = false' \
+            || { echo "::error::bloc [auth.sms.twilio] non désactivé"; exit 1; }
+          supabase config push --project-ref "$PROJECT_REF" --yes
       - name: Secrets Vault pour pg_cron
         if: steps.check.outputs.skip != 'true'
         env:
