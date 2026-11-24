@@ -1,0 +1,152 @@
+name: CI / CD
+
+on:
+  pull_request:
+  push:
+    branches: [main, staging]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  functions:
+    name: Edge Functions (fmt, lint, types, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno fmt --check
+      - run: deno lint
+      - run: deno check supabase/functions/*/index.ts
+      - run: deno test --allow-env --allow-net
+
+  database:
+    name: Base de données (migrations, lint, pgTAP)
+    runs-on: ubuntu-latest
+    env:
+      # Valeurs locales factices, nécessaires à config.toml.
+      SEND_SMS_HOOK_URI: http://host.docker.internal:54321/functions/v1/auth-send-sms
+      SEND_SMS_HOOK_SECRETS: v1,whsec_bG9jYWwtZGV2LW9ubHktc2VuZC1zbXMtaG9vay1zZWNyZXQ=
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Démarrer Supabase (services utiles aux tests)
+        run: supabase start -x studio,imgproxy,edge-runtime,logflare,vector,supavisor,mailpit,postgres-meta
+      - name: Lint SQL (plpgsql_check)
+        run: supabase db lint --level error --fail-on error
+      - name: Tests pgTAP (RLS, SOS, contrainte, rétention…)
+        run: supabase test db
+      - name: Rejouer migrations + seed depuis zéro
+        run: supabase db reset
+
+  e2e:
+    name: Bout en bout (SOS, contrainte, RLS via l'API)
+    runs-on: ubuntu-latest
+    env:
+      SEND_SMS_HOOK_URI: http://host.docker.internal:54321/functions/v1/auth-send-sms
+      SEND_SMS_HOOK_SECRETS: v1,whsec_bG9jYWwtZGV2LW9ubHktc2VuZC1zbXMtaG9vay1zZWNyZXQ=
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Démarrer Supabase (avec Edge Runtime)
+        run: supabase start -x studio,imgproxy,logflare,vector,supavisor,mailpit,postgres-meta
+      - name: Servir les Edge Functions
+        run: |
+          cp supabase/functions/.env.example supabase/functions/.env
+          nohup supabase functions serve --env-file supabase/functions/.env > functions.log 2>&1 &
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:54321/functions/v1/sos-track -d '{}' || true)
+            [ "$code" = "404" ] && break
+            sleep 2
+          done
+      - name: Tests e2e
+        run: |
+          eval "$(supabase status -o env)"
+          export SUPABASE_URL="$API_URL"
+          export SUPABASE_ANON_KEY="${ANON_KEY:-$PUBLISHABLE_KEY}"
+          export SUPABASE_SERVICE_ROLE_KEY="${SERVICE_ROLE_KEY:-$SECRET_KEY}"
+          deno test --allow-env --allow-net supabase/functions/tests/e2e/
+      - name: Journaux des fonctions
+        if: always()
+        run: cat functions.log || true
+
+  deploy:
+    name: Déploiement ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'staging')
+    needs: [functions, database, e2e]
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+      SEND_SMS_HOOK_URI: https://${{ vars.SUPABASE_PROJECT_REF }}.supabase.co/functions/v1/auth-send-sms
+      SEND_SMS_HOOK_SECRETS: ${{ secrets.SEND_SMS_HOOK_SECRETS }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vérifier la configuration de l'environnement
+        id: check
+        run: |
+          missing=""
+          for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD PROJECT_REF SEND_SMS_HOOK_SECRETS; do
+            [ -z "${!v}" ] && missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::Déploiement ignoré, configuration manquante :$missing (voir README, « Déploiement »)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: supabase/setup-cli@v1
+        if: steps.check.outputs.skip != 'true'
+        with:
+          version: latest
+      - name: Lier le projet
+        if: steps.check.outputs.skip != 'true'
+        run: supabase link --project-ref "$PROJECT_REF"
+      - name: Migrations
+        if: steps.check.outputs.skip != 'true'
+        run: supabase db push --include-all
+      - name: Secrets des Edge Functions
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FUNCTION_SECRETS_ENV: ${{ secrets.FUNCTION_SECRETS_ENV }}
+        run: |
+          if [ -n "$FUNCTION_SECRETS_ENV" ]; then
+            umask 077
+            printf '%s\n' "$FUNCTION_SECRETS_ENV" > /tmp/functions.env
+            supabase secrets set --env-file /tmp/functions.env --project-ref "$PROJECT_REF"
+            rm -f /tmp/functions.env
+          else
+            echo "::notice::FUNCTION_SECRETS_ENV absent : secrets des fonctions inchangés."
+          fi
+      - name: Edge Functions
+        if: steps.check.outputs.skip != 'true'
+        run: supabase functions deploy --project-ref "$PROJECT_REF" --use-api
+      - name: Configuration Auth (hook SMS, téléphone, MFA, limites)
+        if: steps.check.outputs.skip != 'true'
+        run: supabase config push --project-ref "$PROJECT_REF" --yes
+      - name: Secrets Vault pour pg_cron
+        if: steps.check.outputs.skip != 'true'
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -n "$CRON_SECRET" ] && [ -n "$SUPABASE_DB_URL" ]; then
+            sudo apt-get install -y -qq postgresql-client >/dev/null
+            PROJECT_URL="https://$PROJECT_REF.supabase.co" ./scripts/configure-vault.sh
+          else
+            echo "::notice::CRON_SECRET / SUPABASE_DB_URL absents : secrets Vault inchangés."
+          fi

@@ -1,0 +1,50 @@
+name: Sauvegarde quotidienne (production)
+
+# Dump logique chiffré (GPG symétrique, AES-256) conservé 14 jours en artefact.
+# Complète les sauvegardes Supabase (quotidiennes / PITR selon le plan).
+# Les dumps contiennent des données personnelles et de position : ils ne sont
+# JAMAIS stockés en clair.
+
+on:
+  schedule:
+    - cron: "30 2 * * *" # 02:30 UTC = 02:30 Dakar
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Dump et chiffrement
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ] || [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::warning::SUPABASE_DB_URL ou BACKUP_PASSPHRASE absent : sauvegarde ignorée."
+            exit 0
+          fi
+          set -euo pipefail
+          umask 077
+          mkdir -p backup
+          stamp=$(date -u +%Y%m%dT%H%MZ)
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/roles.sql --role-only
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/schema.sql
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/data.sql --use-copy --data-only
+          tar -czf - -C backup . | gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase "$BACKUP_PASSPHRASE" -o "jammtech-$stamp.tar.gz.gpg"
+          rm -rf backup
+          echo "FILE=jammtech-$stamp.tar.gz.gpg" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        if: env.FILE != ''
+        with:
+          name: ${{ env.FILE }}
+          path: ${{ env.FILE }}
+          retention-days: 14

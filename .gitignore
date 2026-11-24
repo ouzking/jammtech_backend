@@ -1,0 +1,17 @@
+# Secrets locaux — ne jamais committer
+.env
+*.env
+!*.env.example
+.env.local
+supabase/.env
+supabase/functions/.env
+
+# Supabase CLI
+supabase/.temp/
+supabase/.branches/
+
+# Divers
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
