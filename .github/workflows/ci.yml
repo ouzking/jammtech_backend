@@ -83,6 +83,12 @@ jobs:
       - name: Journaux des fonctions
         if: always()
         run: cat functions.log || true
+      - name: Diagnostic Auth (en cas d'échec)
+        if: failure()
+        run: |
+          c=$(docker ps --format '{{.Names}}' | grep -E 'supabase_auth' | head -1)
+          docker exec "$c" env | grep -E 'GOTRUE_(EXTERNAL_PHONE|SMS_|HOOK_SEND_SMS_(ENABLED|URI))' | sed 's/SECRETS=.*/SECRETS=***/' || true
+          docker logs --tail 40 "$c" 2>&1 || true
 
   deploy:
     name: Déploiement ${{ github.ref_name == 'main' && 'production' || 'staging' }}
