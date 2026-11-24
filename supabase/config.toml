@@ -270,6 +270,8 @@ otp_expiry = 3600
 # Allow/disallow the phone provider. When false, users can't sign up or sign in with SMS.
 # To block new signups only, set enable_signup = false under [auth] instead.
 enabled = true
+# Active la connexion / l'inscription par téléphone (clé lue par le CLI et `config push`).
+enable_signup = true
 # If enabled, users need to confirm their phone number before signing in.
 enable_confirmations = true
 # Template for sending OTP to users (non utilisé : le hook auth-send-sms rédige le SMS).
