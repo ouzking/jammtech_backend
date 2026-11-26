@@ -481,3 +481,21 @@ verify_jwt = false
 
 [functions.sms-status]
 verify_jwt = false
+
+[functions.trip-start]
+verify_jwt = false
+
+[functions.trip-checkin]
+verify_jwt = false
+
+[functions.trip-arrive]
+verify_jwt = false
+
+[functions.trip-cancel]
+verify_jwt = false
+
+[functions.trip-watchdog]
+verify_jwt = false
+
+[functions.tracker-event]
+verify_jwt = false
