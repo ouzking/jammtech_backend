@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow">
-  <title>JammTech — Suivi SOS</title>
+  <title>JammTech — Suivi</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
   <style>
@@ -32,6 +32,12 @@
     <strong>Ne l'appelez pas.</strong> Si vous pensez qu'elle est en danger, contactez la Police (17) ou la Gendarmerie (800 00 20 20).
   </div>
   <div class="card ok hidden" id="closed"></div>
+  <div class="card hidden" id="trip">
+    <div id="tripDest"></div>
+    <div id="tripEta" class="muted"></div>
+    <div id="tripVehicle" class="muted"></div>
+    <img id="tripPhoto" class="hidden" alt="Photo du véhicule" style="margin-top:8px;max-width:100%;border-radius:10px">
+  </div>
   <div class="card hidden" id="error"></div>
   <div id="map" class="hidden"></div>
   <div class="card hidden" id="info">
@@ -63,7 +69,42 @@
         clearInterval(timer);
       }
 
+      var modes = { taxi: "Taxi", clando: "Clando", moto: "Moto", public: "Transport en commun", walk: "À pied", car: "Voiture" };
+
+      function renderTripInfo(d) {
+        var running = d.status === "active" || d.status === "escalated";
+        show("trip", running);
+        if (!running) return;
+        $("tripDest").textContent = (modes[d.mode] || "Trajet") + " vers " + (d.destination_label || "destination");
+        var eta = "Arrivée prévue à " + fmtTime(d.expected_arrival_at);
+        var late = Math.floor((Date.now() - Date.parse(d.expected_arrival_at)) / 60000);
+        if (late > 0) eta += " — retard de " + late + " min";
+        if (d.last_battery != null && d.last_battery <= 15) eta += " · batterie " + d.last_battery + " %";
+        $("tripEta").textContent = eta;
+        var v = [d.vehicle_plate, d.vehicle_note].filter(Boolean).join(" · ");
+        $("tripVehicle").textContent = v ? "Véhicule : " + v : "";
+        if (d.vehicle_photo_url) { $("tripPhoto").src = d.vehicle_photo_url; show("tripPhoto", true); }
+      }
+
       function render(d) {
+        if (d.kind === "trip") {
+          renderTripInfo(d);
+          if (d.status === "active" || d.status === "escalated") {
+            $("title").textContent = d.status === "escalated"
+              ? "SOS — " + (d.name || "un proche") + " ne répond plus"
+              : "Trajet de " + (d.name || "un proche");
+            $("dot").style.background = d.status === "escalated" ? "var(--danger)" : "var(--ok)";
+            return renderMap(d);
+          }
+          $("title").textContent = (d.name || "La personne") + " : trajet terminé";
+          $("dot").style.display = "none";
+          $("closed").textContent = d.status === "arrived"
+            ? (d.name || "La personne") + " est bien arrivé·e" + (d.ended_at ? " à " + fmtTime(d.ended_at) : "") + "."
+            : "Le trajet est terminé.";
+          show("closed", true); show("map", false); show("info", false);
+          clearInterval(timer);
+          return;
+        }
         if (d.status !== "active") {
           $("title").textContent = (d.name || "La personne") + " : alerte terminée";
           $("dot").style.display = "none";
@@ -76,6 +117,10 @@
         }
         $("title").textContent = "SOS — " + (d.name || "un proche") + " a besoin d'aide";
         show("silent", !!d.silent);
+        renderMap(d);
+      }
+
+      function renderMap(d) {
         var pts = (d.trail || []).map(function (p) { return [p.lat, p.lng]; });
         if (!pts.length) {
           $("updated").textContent = "En attente de la position…";

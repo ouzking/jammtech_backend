@@ -358,5 +358,146 @@ final accessLog = await supabase.from('audit_log').select().order('created_at', 
 | `ArmMode` | `homes.arm_mode` + `set_arm_mode` / `disarm` |
 | Écran SOS | `sos-trigger`, `push_location`, `sos-resolve` |
 | Carte | `push_location`, `start/stop_location_share`, `get_live_location`, `nearby_risks` |
+| Transport (nouveau) | §12 `trip-*`, `get_trip_live`, `get_transport_summary`, `route_risks` ; §13 véhicules |
 
 Valeurs d'énumération : `AlertSeverity` ↔ `critical|warning|info` ; `ArmMode` ↔ `disarmed|home|away`.
+
+---
+
+## 12. Trajets (« Trajet sécurisé »)
+
+**L'escalade est faite par le serveur.** Si le téléphone est volé, éteint ou sans réseau, le serveur constate
+le retard (pg_cron, chaque minute), demande « Tout va bien ? » puis déclenche le SOS tout seul.
+
+### Démarrer
+
+```dart
+final clientKey = const Uuid().v4(); // à conserver jusqu'au succès (idempotence)
+final r = await supabase.functions.invoke('trip-start', body: {
+  'client_key': clientKey,
+  'mode': 'taxi',                     // taxi | clando | moto | public | walk | car
+  'destination': {'lat': 14.7167, 'lng': -17.4677, 'label': 'Maison, Mermoz'},
+  'origin': {'lat': lat, 'lng': lng, 'label': 'Plateau'},           // facultatif
+  'expected_arrival_at': eta.toUtc().toIso8601String(),              // futur, ≤ 24 h
+  'grace_minutes': 15,                                               // 0..120 (défaut 15)
+  'checkin_first_minutes': 3, 'checkin_second_minutes': 2,           // 1..15 (plus courts la nuit si souhaité)
+  'watcher_contact_ids': [contactId1, contactId2],                   // défaut : tous les proches
+  'vehicle_plate': 'DK-1234-AB',                                     // lue par OCR sur le téléphone
+  'vehicle_note': 'Taxi jaune',
+  'route': [[14.6928, -17.4467], [14.7167, -17.4677]],               // facultatif, 2..500 points
+  'position': {'lat': lat, 'lng': lng, 'accuracy_m': acc},
+});
+// 200 {trip: {...}, created, watchers}   409 trip_already_active {details: {trip_id}}
+```
+
+Photo du véhicule (facultative) : bucket privé `vehicle-photos`, chemin **`<user_id>/<trip_id>.jpg`**, 1 Mo max.
+
+```dart
+await supabase.storage.from('vehicle-photos').uploadBinary('$uid/$tripId.jpg', bytes);
+await supabase.rpc('set_trip_vehicle', params: {'p_trip_id': tripId, 'p_photo_path': '$uid/$tripId.jpg'});
+```
+
+Pendant le trajet : `push_location` comme d'habitude (les points sont rattachés au trajet). **Arrivée
+automatique** à moins de 150 m de la destination.
+
+### Pendant le trajet
+
+```dart
+await supabase.rpc('trip_extend', params: {'p_trip_id': tripId, 'p_minutes': 15}); // 5..120, 3 fois max
+await supabase.rpc('trip_battery_low', params: {'p_trip_id': tripId, 'p_level': 8, 'p_lat': lat, 'p_lng': lng});
+// ≤ 15 % : les proches sont prévenus une fois, avec la dernière position.
+
+// Réponse au « Tout va bien ? » (push data.type = trip_checkin) :
+final ok = await supabase.functions.invoke('trip-checkin',
+    body: {'trip_id': tripId, 'code': saisie, 'lat': lat, 'lng': lng});
+// 200 {ok: true, trip_id, next_check_after}   401 invalid_code   429 locked   404 not_found
+```
+
+> ⚠️ **Code de contrainte** accepté ici : réponse **identique** au code normal. L'app ne doit rien faire de
+> différent. Un SOS silencieux part chez les proches ; le trajet reste dans le même état visible.
+
+```dart
+await supabase.functions.invoke('trip-arrive', body: {'trip_id': tripId}); // « Je suis arrivé·e »
+await supabase.functions.invoke('trip-cancel', body: {'trip_id': tripId}); // {…, watchers_notified}
+```
+
+Escalade : « Tout va bien ? » (tour 1) → relance après `checkin_first_minutes` (tour 2, + SMS) → **SOS** après
+`checkin_second_minutes` sans réponse. Déclencheurs : retard au-delà de la marge, aucune position depuis 10 min,
+immobile 10 min loin de la destination, écart de plus de 1 km à l'itinéraire. Après un « oui », pas de nouvelle
+question pendant 10 min. Un SOS pendant un trajet rattache le trajet au SOS (`trips.sos_event_id`).
+
+### Côté proche
+
+```dart
+await supabase.rpc('get_trips_i_watch'); // [{trip_id, status, mode, destination_label, expected_arrival_at, traveler}]
+final live = await supabase.rpc('get_trip_live', params: {'p_trip_id': tripId});
+// null si je ne suis pas watcher ou si le trajet est terminé ; sinon trip + traveler, vehicle_plate,
+// vehicle_photo_path, last_battery, late_minutes, trail [{lat, lng, accuracy_m, recorded_at}]
+supabase.channel('trip:$tripId', opts: const RealtimeChannelConfig(private: true))
+  .onBroadcast(event: 'position', callback: (p) {})  // {trip_id, lat, lng, accuracy_m, recorded_at}
+  .onBroadcast(event: 'status', callback: (p) {})    // {trip_id, status, expected_arrival_at?}
+  .subscribe();
+// Photo : storage.from('vehicle-photos').createSignedUrl(vehicle_photo_path, 300)
+```
+
+Canal `inbox:<mon_id>` : événement `trip_started`. Les proches sans l'app reçoivent un SMS avec un lien de
+suivi web (véhicule, heure prévue, position) qui cesse de fonctionner à la fin du trajet.
+
+| `data.type` (push) | Destinataire | Effet dans l'app |
+|---|---|---|
+| `trip_started` | proche | Ouvrir le suivi du trajet (`data.trip_id`) |
+| `trip_checkin` | voyageur | Écran plein « Tout va bien ? » + saisie du code (`data.round` 1 ou 2) |
+| `trip_late` | proche | « Pas encore arrivé·e, retard de `data.late_minutes` min » |
+| `trip_arrived` | proche | « Arrivé·e à … » (`data.arrived_at`) |
+| `trip_cancelled` | proche | Trajet annulé |
+| `trip_battery_low` | proche | Dernière position connue (`data.level`) |
+| `sos` / `sos_silent` | proches | Escalade : identique à un SOS |
+
+Les heures calmes ne s'appliquent **jamais** aux trajets.
+
+### Résumé et itinéraire
+
+```dart
+await supabase.rpc('get_transport_summary');
+// {active_trip, watched_trips, recent_trips, vehicles}
+await supabase.rpc('route_risks', params: {'p_route': [[lat, lng], ...], 'p_since_minutes': 720, 'p_buffer_m': 300});
+// {count, night, by_category: {theft: 2, …}, reports: [{id, category, lat, lng, created_at}]}
+```
+
+Historique : `supabase.from('trips').select().order('started_at', ascending: false)` et `trip_events`.
+Conservation : 30 jours (90 jours si un SOS y est rattaché), photo comprise.
+
+## 13. Véhicules et traceurs GPS (phase 2)
+
+Modèle et ingestion prêts. **Aucune commande à distance** (coupure moteur) : hors périmètre.
+
+```dart
+await supabase.from('vehicles').insert({'id': vid, 'owner_id': uid, 'type': 'car',
+    'plate': 'DK 5678 CD', 'brand_model': 'Toyota Corolla', 'color': 'Gris'});
+// photo : vehicle-photos/<uid>/v_<vehicle_id>.jpg puis update photo_path
+await supabase.rpc('add_vehicle_member', params: {'p_vehicle_id': vid, 'p_phone': '+221770000001'});
+await supabase.from('vehicle_rules').update({'allowed_start': '06:00', 'allowed_end': '22:00',
+    'night_ignition_alert': true, 'geofence_alert': true}).eq('vehicle_id', vid);
+await supabase.from('vehicle_geofences').insert({'vehicle_id': vid, 'name': 'Maison',
+    'center_lat': 14.7167, 'center_lng': -17.4677, 'radius_m': 300});
+final t = await supabase.rpc('register_tracker', params: {'p_vehicle_id': vid, 'p_name': 'Boîtier',
+    'p_model': 'teltonika', 'p_imei': '356307042441013'});
+// {tracker, ingest_token} → à configurer UNE fois dans la passerelle du traceur
+await supabase.from('tracker_positions').select().eq('vehicle_id', vid).order('recorded_at', ascending: false).limit(500);
+```
+
+Alertes (`security_alerts.category = 'vehicle'`, `vehicle_id`) : traceur débranché, choc, contact moteur la nuit,
+mouvement hors des heures autorisées, sortie de zone, traceur hors ligne (30 min). Elles suivent les
+préférences « intrusions ».
+
+**Passerelle → backend** : `POST /functions/v1/tracker-event`, `Authorization: Bearer <tracker_id>.<secret>`
+
+```json
+{ "event_id": "imei-1732650000", "type": "position",
+  "positions": [{"lat": 14.71, "lng": -17.46, "speed_kmh": 32, "heading": 90, "ignition": true,
+                 "recorded_at": "2026-11-26T20:14:00Z"}],
+  "external_power": true, "battery": 92 }
+```
+
+Types : `position`, `heartbeat`, `ignition`, `power`, `battery`, `shock` ; jusqu'à 100 positions par appel ;
+`event_id` unique par traceur (idempotence).

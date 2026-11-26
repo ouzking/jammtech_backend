@@ -184,7 +184,7 @@ export async function deleteDeadTokens(tokens: string[]): Promise<void> {
 export async function startAndDispatchSos(args: {
   userId: string;
   clientKey: string;
-  trigger: "button" | "duress_code";
+  trigger: "button" | "duress_code" | "trip_watchdog";
   silent: boolean;
   lat?: number;
   lng?: number;

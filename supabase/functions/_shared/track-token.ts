@@ -78,3 +78,23 @@ export async function verifyTrackToken(
   if (exp * 1000 < now) return null;
   return { eventId: bytesToUuid(body.slice(0, 16)), contactId: bytesToUuid(body.slice(16, 32)), exp };
 }
+
+// Liens de suivi d'un TRAJET : même format, clé dérivée distincte, de sorte
+// qu'un jeton de trajet ne puisse jamais ouvrir un SOS (et inversement).
+const tripKey = (secret: string) => `${secret}:trip`;
+
+export function createTripTrackToken(secret: string, tripId: string, contactId: string, ttlSeconds = 26 * 3600) {
+  return createTrackToken(tripKey(secret), tripId, contactId, ttlSeconds);
+}
+
+export async function verifyAnyTrackToken(
+  secret: string,
+  token: string,
+  now = Date.now(),
+): Promise<{ kind: "sos" | "trip"; id: string; contactId: string } | null> {
+  const sos = await verifyTrackToken(secret, token, now);
+  if (sos) return { kind: "sos", id: sos.eventId, contactId: sos.contactId };
+  const trip = await verifyTrackToken(tripKey(secret), token, now);
+  if (trip) return { kind: "trip", id: trip.eventId, contactId: trip.contactId };
+  return null;
+}

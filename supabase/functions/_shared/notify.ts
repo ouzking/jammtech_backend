@@ -32,7 +32,7 @@ export interface AlertRow {
   title: string;
   description: string;
   severity: "critical" | "warning" | "info";
-  category: "intrusion" | "zone" | "device" | "contact" | "system";
+  category: "intrusion" | "zone" | "device" | "contact" | "system" | "vehicle";
   location_label: string | null;
   home_id: string | null;
   recording_id: string | null;
@@ -100,7 +100,8 @@ export function decideChannels(
   now: Date,
 ): Decision {
   const p = prefs ?? DEFAULT_PREFS;
-  const key = alert.category === "intrusion"
+  // Les alertes véhicule (vol, sabotage du traceur) suivent les préférences « intrusions ».
+  const key = alert.category === "intrusion" || alert.category === "vehicle"
     ? "intrusions"
     : alert.category === "zone"
     ? "zones"

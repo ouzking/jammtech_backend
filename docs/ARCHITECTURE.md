@@ -54,6 +54,30 @@ private.* : storage_deletion_queue, otp_sms_log, fonctions d'aide RLS
 | D15 | Double authentification : **TOTP** (gratuit). Le MFA par SMS de Supabase est une option payante. | Coût. |
 | D16 | Avatars redimensionnés **par l'app** (600 px), bucket limité à 1 Mo et aux images. | La transformation d'images côté serveur nécessite le plan Pro. |
 
+## Transport (pilier ajouté le 2026-11-26)
+
+```
+trips ─┬─ trip_watchers (sous-ensemble des trusted_contacts)
+       ├─ trip_events (journal + file d'envoi : dispatched_at)
+       ├─ location_points.trip_id (traces, 30 j)
+       └─ sos_event_id (escalade / SOS pendant le trajet)
+vehicles ─┬─ vehicle_members (owner|member) · vehicle_rules · vehicle_geofences
+          └─ trackers ─┬─ tracker_credentials (sha256) · tracker_events (30 j)
+                       └─ tracker_positions (PostGIS, 30 j)
+```
+
+| # | Décision | Pourquoi |
+|---|---|---|
+| T1 | **Escalade 100 % serveur** : `pg_cron` (chaque minute) exécute `private.trip_watchdog_tick()` qui évalue retard, absence de position, arrêt prolongé, écart d'itinéraire ; « Tout va bien ? » → relance → SOS. | Un téléphone volé, éteint ou sans réseau ne peut ni empêcher ni retarder l'alerte. |
+| T2 | **File d'envoi** `trip_events` : réclamation `SKIP LOCKED`, nouvel essai après 2 min ; envoi immédiat par la fonction appelante, réveil `pg_net` après COMMIT, balayage `pg_cron` en secours. | Au moins une fois, sans doublon simultané, même si une fonction Edge tombe. |
+| T3 | Escalade = SOS ordinaire dont la clé d'idempotence est **l'id du trajet**. | Un seul SOS par trajet, quel que soit le nombre de rejeux ; réutilise toute la chaîne SOS (push + SMS, suivi, clôture). |
+| T4 | `trip-checkin` accepte le **code de contrainte** : même réponse, même état visible du trajet ; l'événement `checkin_duress` n'est lisible par aucun client ; un SOS silencieux n'est jamais rattaché au trajet. | Indiscernable pour l'agresseur, y compris dans l'historique. |
+| T5 | Un proche voit un trajet **seulement s'il en est watcher et que le trajet est en cours** ; chaque consultation est auditée. | Exigence du brief ; minimisation. |
+| T6 | Démarrage : push aux proches avec l'app, **SMS seulement aux proches sans l'app** (avec lien de suivi). Retard : push seulement. Escalade : SOS complet. | Coût SMS maîtrisé sans perdre personne (question ouverte du brief : choix par défaut). |
+| T7 | Délais « Tout va bien ? » réglables **par trajet** (`checkin_first_minutes`, `checkin_second_minutes`, défaut 3 et 2). | L'app peut les raccourcir la nuit sans changement serveur. |
+| T8 | Lien de suivi de trajet : même format que le SOS, **clé HMAC dérivée distincte**. | Un lien de trajet ne peut jamais ouvrir un SOS (et inversement). |
+| T9 | Phase 2 : modèle, webhook `tracker-event` et alertes ; **aucune commande à distance**. Un test vérifie qu'aucune fonction de coupure moteur n'existe. | Cadre juridique et de sécurité non validé ; couper un moteur en mouvement est dangereux. |
+
 ## Fournisseurs SMS — comparaison
 
 Critères : délivrabilité sur Orange / Free / Expresso, coût, latence, accusés de livraison, Sender ID.

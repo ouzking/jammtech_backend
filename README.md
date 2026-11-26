@@ -9,7 +9,7 @@ modification manuelle dans le dashboard** qui ne soit pas reproduite dans ce dé
 | Document | Contenu |
 |---|---|
 | [docs/API.md](docs/API.md) | Contrat pour l'équipe mobile : tables, RPC, fonctions, exemples `supabase_flutter` |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Schéma, décisions, comparaison des fournisseurs SMS, hypothèses |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Schéma, décisions (dont Transport), comparaison des fournisseurs SMS, hypothèses |
 
 ## Contenu
 
@@ -28,6 +28,10 @@ supabase/
     delete-account/           Suppression complète du compte
     auth-send-sms/            Hook Auth : envoi des OTP via nos fournisseurs SMS
     sms-status/               Accusés de livraison SMS
+    trip-start/ trip-checkin/ Trajet sécurisé : démarrage, « Tout va bien ? » (code de contrainte accepté)
+    trip-arrive/ trip-cancel/ Arrivée, annulation
+    trip-watchdog/            Escalade serveur (pg_cron) et envoi des notifications de trajet
+    tracker-event/            Webhook des traceurs GPS de véhicules (sans commande à distance)
     _shared/                  HTTP, validation, SMS multi-fournisseurs, FCM, jetons, textes FR
     tests/                    Tests unitaires Deno + tests e2e (CI)
   tests/database/             Tests pgTAP (RLS A/B, SOS, contrainte, rétention, conformité)
